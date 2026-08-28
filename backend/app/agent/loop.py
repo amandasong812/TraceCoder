@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+import json
+
 from app.agent.action_parser import ActionParseError, parse_agent_action
-from app.agent.prompts import SYSTEM_PROMPT, build_user_prompt
+from app.agent.prompts import SYSTEM_PROMPT, build_repair_prompt, build_user_prompt
 from app.models import AgentAction, NodeStatus, TraceRun
 from app.ollama_client import OllamaClient, OllamaConnectionError, OllamaModelError
 from app.tools.registry import ToolRegistry
 from app.trace_store import TraceStore
+
+
+@dataclass
+class AgentDecision:
+    action: AgentAction
+    terminal_error: bool = False
 
 
 class AgentLoop:
@@ -20,6 +29,7 @@ class AgentLoop:
         self.registry = registry
         self.store = store
         self.max_steps = max_steps
+        self.parse_retries = 1
 
     async def run(self, run: TraceRun) -> TraceRun:
         run.status = "running"
@@ -28,7 +38,8 @@ class AgentLoop:
 
         try:
             for step in range(self.max_steps):
-                action = await self._next_action(run)
+                decision = await self._next_decision(run)
+                action = decision.action
                 run.add_event("action", {"step": step + 1, "action": action.model_dump()})
 
                 if action.kind == "plan":
@@ -58,7 +69,7 @@ class AgentLoop:
                     continue
 
                 if action.kind == "final":
-                    run.status = "success"
+                    run.status = "failed" if decision.terminal_error else "success"
                     run.final_report = action.final_report or "Task finished."
                     run.add_event("final", {"final_report": run.final_report})
                     self.store.save(run)
@@ -77,20 +88,32 @@ class AgentLoop:
         self.store.save(run)
         return run
 
-    async def _next_action(self, run: TraceRun) -> AgentAction:
+    async def _next_decision(self, run: TraceRun) -> AgentDecision:
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": build_user_prompt(run.task, self.registry.describe(), self._trace_context(run))},
         ]
-        raw = await self.client.chat(messages)
-        try:
-            return parse_agent_action(raw)
-        except ActionParseError as exc:
-            return AgentAction(
+        raw = ""
+        last_error = ""
+        for attempt in range(self.parse_retries + 1):
+            raw = await self.client.chat(messages)
+            run.add_event("model_output", {"attempt": attempt + 1, "raw": raw})
+            try:
+                return AgentDecision(parse_agent_action(raw))
+            except ActionParseError as exc:
+                last_error = str(exc)
+                run.add_event("parse_error", {"attempt": attempt + 1, "error": last_error, "raw": raw})
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({"role": "user", "content": build_repair_prompt(raw, last_error)})
+
+        return AgentDecision(
+            AgentAction(
                 kind="final",
-                thought="The model returned an invalid structured action.",
-                final_report=f"Stopped because model output could not be parsed: {exc}",
-            )
+                thought="The model repeatedly returned invalid structured actions.",
+                final_report=f"Stopped because model output could not be parsed: {last_error}",
+            ),
+            terminal_error=True,
+        )
 
     def _trace_context(self, run: TraceRun) -> str:
         plan = [node.model_dump() for node in run.plan]

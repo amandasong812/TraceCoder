@@ -32,3 +32,14 @@ Trace so far:
 
 Return the next JSON action."""
 
+
+def build_repair_prompt(raw_output: str, error: str) -> str:
+    return f"""The previous response was not a valid TraceCoder action.
+
+Parser error:
+{error}
+
+Previous response:
+{raw_output}
+
+Return exactly one corrected JSON object. Do not include markdown or explanation."""
