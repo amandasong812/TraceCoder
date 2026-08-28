@@ -13,6 +13,8 @@ class FakeClient:
         self.calls = 0
 
     async def chat(self, messages: list[dict[str, str]]) -> str:
+        if self.calls >= len(self.responses):
+            return '{"kind":"final","final_report":"no more responses"}'
         response = self.responses[self.calls]
         self.calls += 1
         return response
@@ -71,27 +73,27 @@ def test_agent_loop_blocks_unverified_code_repair_final(tmp_path: Path) -> None:
     assert any(observation.tool == "final_guard" for observation in result.observations)
 
 
-def test_agent_loop_forces_demo_repair_sequence(tmp_path: Path) -> None:
-    loop, run = make_loop(tmp_path, [])
+def test_agent_loop_blocks_repeated_read_and_repairs_with_model(tmp_path: Path) -> None:
+    loop, run = make_loop(
+        tmp_path,
+        [
+            '{"kind":"tool","tool_call":{"tool":"read_file","node_id":"inspect","args":{"path":"demo_project/calculator.py"}}}',
+            '{"kind":"tool","tool_call":{"tool":"run_command","node_id":"validate_before","args":{"command":"python -m pytest demo_project"}}}',
+        ],
+    )
     run.task = "修复 demo_project 中失败的测试"
-
-    first = asyncio.run(loop._next_decision(run))
-    assert first.action.kind == "plan"
-
-    run.plan = first.action.plan
-    second = asyncio.run(loop._next_decision(run))
-    assert second.action.tool_call is not None
-    assert second.action.tool_call.tool == "read_file"
-
     run.observations.append(
         ToolObservation(
             node_id="inspect",
             tool="read_file",
             ok=True,
             summary="read",
+            data={"path": "demo_project/calculator.py"},
         )
     )
-    third = asyncio.run(loop._next_decision(run))
-    assert third.action.tool_call is not None
-    assert third.action.tool_call.tool == "run_command"
-    assert third.action.tool_call.node_id == "test_before"
+
+    decision = asyncio.run(loop._next_decision(run))
+
+    assert decision.action.tool_call is not None
+    assert decision.action.tool_call.tool == "run_command"
+    assert any(event.type == "policy_blocked" for event in run.events)
