@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shlex
 
 from app.models import ToolObservation
@@ -29,9 +30,17 @@ class RunCommandTool(Tool):
         if executable not in self.allowed_executables:
             raise ValueError(f"Command executable is not allowed: {parts[0]}")
 
+        original_command = command
+        parts = self._normalize_command(parts)
+        command = " ".join(parts)
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(self.sandbox.root)
+        env["PYTHONIOENCODING"] = "utf-8"
+
         proc = await asyncio.create_subprocess_exec(
             *parts,
             cwd=str(self.sandbox.root),
+            env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -45,7 +54,13 @@ class RunCommandTool(Tool):
                 tool=self.name,
                 ok=False,
                 summary=f"Command timed out after {timeout}s",
-                data={"command": command, "exit_code": None, "stdout": "", "stderr": "timeout"},
+                data={
+                    "command": command,
+                    "original_command": original_command,
+                    "exit_code": None,
+                    "stdout": "",
+                    "stderr": "timeout",
+                },
             )
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")
@@ -55,6 +70,25 @@ class RunCommandTool(Tool):
             tool=self.name,
             ok=proc.returncode == 0,
             summary=f"Command exited with {proc.returncode}: {command}",
-            data={"command": command, "exit_code": proc.returncode, "stdout": stdout, "stderr": stderr},
+            data={
+                "command": command,
+                "original_command": original_command,
+                "exit_code": proc.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+            },
         )
 
+    def _normalize_command(self, parts: list[str]) -> list[str]:
+        executable = parts[0].lower()
+        if executable.endswith(".exe"):
+            executable = executable[:-4]
+        if executable == "pytest":
+            normalized = ["python", "-m", "pytest", *parts[1:]]
+            if "--basetemp" not in normalized:
+                normalized.extend(["--basetemp", ".pytest_tmp"])
+            return normalized
+        if executable == "python" and len(parts) >= 3 and parts[1:3] == ["-m", "pytest"]:
+            if "--basetemp" not in parts:
+                return [*parts, "--basetemp", ".pytest_tmp"]
+        return parts
