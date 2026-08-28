@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -12,6 +13,7 @@ from app.agent.action_parser import ActionParseError, parse_agent_action
 from app.agent.loop import AgentLoop
 from app.agent.prompts import SYSTEM_PROMPT
 from app.config import get_settings
+from app.demo import reset_demo_project
 from app.ollama_client import OllamaClient, OllamaConnectionError, OllamaModelError
 from app.tools import build_tool_registry
 from app.tools.sandbox import WorkspaceSandbox
@@ -90,11 +92,33 @@ async def tools() -> list[dict[str, object]]:
     return registry.describe()
 
 
+@app.post("/api/uploads")
+async def upload_file(file: UploadFile = File(...)) -> dict[str, object]:
+    filename = Path(file.filename or "uploaded_file").name
+    if not filename:
+        raise HTTPException(status_code=400, detail="Filename is required")
+    target_dir = sandbox.resolve("uploads")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = sandbox.resolve(f"uploads/{filename}")
+    content = await file.read()
+    target_path.write_bytes(content)
+    return {
+        "path": sandbox.display_path(target_path),
+        "filename": filename,
+        "size": len(content),
+    }
+
+
 @app.post("/api/runs")
 async def create_run(request: TaskRequest) -> dict[str, str]:
     run = store.create(request.task)
     asyncio.create_task(agent.run(run))
     return {"run_id": run.id}
+
+
+@app.post("/api/demo/reset")
+async def reset_demo() -> dict[str, str]:
+    return reset_demo_project(sandbox)
 
 
 @app.get("/api/runs/{run_id}")

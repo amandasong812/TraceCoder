@@ -16,6 +16,8 @@ Rules:
 - Use only tools listed by the backend.
 - Keep node_id tied to the relevant plan node.
 - Prefer small edits and run validation commands after changes.
+- For Python validation, call run_command with "python -m pytest demo_project".
+- For coding fixes, do not return final until a file was written and validation was run after the edit.
 - Finish when the task is complete or clearly blocked.
 """
 
