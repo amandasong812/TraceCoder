@@ -40,6 +40,25 @@ export async function fetchOllamaStatus(): Promise<OllamaStatus> {
   return response.json();
 }
 
+export type UploadedFile = {
+  path: string;
+  filename: string;
+  size: number;
+};
+
+export async function uploadFile(file: File): Promise<UploadedFile> {
+  const body = new FormData();
+  body.append("file", file);
+  const response = await fetch("/api/uploads", {
+    method: "POST",
+    body
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to upload file: ${response.status}`);
+  }
+  return response.json();
+}
+
 export async function createRun(task: string): Promise<string> {
   const response = await fetch("/api/runs", {
     method: "POST",
