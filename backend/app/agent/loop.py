@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import json
-
-from pydantic import ValidationError
-
+from app.agent.action_parser import ActionParseError, parse_agent_action
 from app.agent.prompts import SYSTEM_PROMPT, build_user_prompt
 from app.models import AgentAction, NodeStatus, TraceRun
 from app.ollama_client import OllamaClient, OllamaConnectionError, OllamaModelError
@@ -87,9 +84,8 @@ class AgentLoop:
         ]
         raw = await self.client.chat(messages)
         try:
-            payload = json.loads(self._extract_json(raw))
-            return AgentAction.model_validate(payload)
-        except (json.JSONDecodeError, ValidationError, ValueError) as exc:
+            return parse_agent_action(raw)
+        except ActionParseError as exc:
             return AgentAction(
                 kind="final",
                 thought="The model returned an invalid structured action.",
@@ -106,13 +102,3 @@ class AgentLoop:
             if node.id == node_id:
                 node.status = status
                 return
-
-    def _extract_json(self, raw: str) -> str:
-        stripped = raw.strip()
-        if stripped.startswith("{") and stripped.endswith("}"):
-            return stripped
-        start = stripped.find("{")
-        end = stripped.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            raise ValueError("No JSON object found")
-        return stripped[start : end + 1]

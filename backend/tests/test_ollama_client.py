@@ -16,7 +16,12 @@ class FakeOllamaClient(OllamaClient):
 
 def test_resolve_model_prefers_installed_coder_model() -> None:
     client = FakeOllamaClient(["qwen2.5:1.5b", "qwen3-coder:480b-cloud"])
-    assert asyncio.run(client.resolve_model()) == "qwen3-coder:480b-cloud"
+    assert asyncio.run(client.resolve_model()) == "qwen2.5:1.5b"
+
+
+def test_resolve_model_prefers_local_model_over_cloud_fallback() -> None:
+    client = FakeOllamaClient(["custom-cloud", "local-model"])
+    assert asyncio.run(client.resolve_model()) == "local-model"
 
 
 def test_resolve_model_uses_configured_model_when_installed() -> None:

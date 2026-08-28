@@ -8,9 +8,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.agent.action_parser import ActionParseError, parse_agent_action
 from app.agent.loop import AgentLoop
+from app.agent.prompts import SYSTEM_PROMPT
 from app.config import get_settings
-from app.ollama_client import OllamaClient
+from app.ollama_client import OllamaClient, OllamaConnectionError, OllamaModelError
 from app.tools import build_tool_registry
 from app.tools.sandbox import WorkspaceSandbox
 from app.trace_store import TraceStore
@@ -18,6 +20,10 @@ from app.trace_store import TraceStore
 
 class TaskRequest(BaseModel):
     task: str
+
+
+class ProbeRequest(BaseModel):
+    prompt: str = "Return a two-step plan for checking backend health. Do not call tools."
 
 
 settings = get_settings()
@@ -54,6 +60,29 @@ async def ollama_status() -> dict[str, object]:
             "error": str(exc),
         }
     return status
+
+
+@app.post("/api/ollama/probe")
+async def ollama_probe(request: ProbeRequest) -> dict[str, object]:
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": (
+                f"{request.prompt}\n\n"
+                "Return exactly one JSON plan action. The action must use kind='plan' and include at least one node."
+            ),
+        },
+    ]
+    try:
+        raw = await client.chat(messages)
+    except (OllamaConnectionError, OllamaModelError) as exc:
+        return {"ok": False, "raw": "", "error": str(exc)}
+    try:
+        action = parse_agent_action(raw)
+    except ActionParseError as exc:
+        return {"ok": False, "raw": raw, "error": str(exc)}
+    return {"ok": True, "model": await client.resolve_model(), "raw": raw, "action": action.model_dump()}
 
 
 @app.get("/api/tools")

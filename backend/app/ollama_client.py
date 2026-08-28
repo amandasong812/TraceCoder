@@ -3,7 +3,7 @@ from __future__ import annotations
 import httpx
 
 
-PREFERRED_MODELS = ["qwen2.5-coder:7b", "qwen3-coder:480b-cloud", "qwen2.5:1.5b"]
+PREFERRED_MODELS = ["qwen2.5-coder:7b", "qwen2.5:1.5b"]
 
 
 class OllamaConnectionError(RuntimeError):
@@ -41,6 +41,10 @@ class OllamaClient:
             if preferred in models:
                 self.model = preferred
                 return preferred
+        for model in models:
+            if not model.endswith("-cloud"):
+                self.model = model
+                return model
         if not models:
             raise OllamaModelError("No Ollama models are installed.")
         self.model = models[0]
