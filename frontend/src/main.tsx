@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Activity, CheckCircle2, Circle, Cpu, FileUp, ListChecks, PanelLeftClose, PanelLeftOpen, Pencil, Play, Send, Terminal, Trash2, XCircle } from "lucide-react";
+import { Activity, Bot, CheckCircle2, Circle, Cpu, FileUp, ListChecks, LoaderCircle, PanelLeftClose, PanelLeftOpen, Pencil, Play, Send, Terminal, Trash2, XCircle } from "lucide-react";
 import {
   cancelRun,
   continueRun,
@@ -216,8 +216,29 @@ function richBlocks(text: string): RichBlock[] {
   });
 }
 
+function readableMessageContent(text: string) {
+  const withoutThink = text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  if (!withoutThink.startsWith("{")) return withoutThink;
+  try {
+    const action = JSON.parse(withoutThink) as {
+      kind?: string;
+      thought?: string;
+      final_report?: string;
+      plan?: Array<{ title?: string }>;
+      tool_call?: { tool?: string; node_id?: string };
+    };
+    if (action.kind === "final" && action.final_report) return action.final_report;
+    if (action.kind === "plan" && action.plan?.length) return `**已生成计划图**\n${action.plan.map((node) => `- ${node.title ?? "未命名节点"}`).join("\n")}`;
+    if (action.kind === "tool" && action.tool_call) return `**准备调用工具**\n工具：\`${action.tool_call.tool ?? "unknown"}\`\n节点：\`${action.tool_call.node_id ?? "unknown"}\``;
+    if (action.thought) return `**正在思考**\n${action.thought}`;
+  } catch {
+    return "正在解析模型输出...";
+  }
+  return "正在解析模型输出...";
+}
+
 function RichText({ text }: { text: string }) {
-  const blocks = useMemo(() => richBlocks(text), [text]);
+  const blocks = useMemo(() => richBlocks(readableMessageContent(text)), [text]);
   return (
     <div className="richText">
       {blocks.map((block, index) => {
@@ -345,24 +366,29 @@ function RunHistory({
 
 function ChatTimeline({ run, error }: { run: TraceRun | null; error: string | null }) {
   const messages = useMemo(() => {
-    const rows: Array<{ role: ChatRole; title: string; body: string }> = [];
+    const rows: Array<{ role: ChatRole; title: string; body: string; eventType?: string | null }> = [];
     if (run?.messages?.length) {
       for (const message of run.messages) {
+        if (message.event_type === "action") continue;
+        if (message.event_type === "final") {
+          const previousStream = [...rows].reverse().find((row) => row.eventType === "model_stream");
+          if (previousStream && readableMessageContent(previousStream.body) === readableMessageContent(message.content)) continue;
+        }
         rows.push({
           role: message.role === "assistant" || message.role === "system" ? "agent" : message.role,
           title: message.event_type === "model_stream" ? "实时回复" : message.title,
-          body: message.content
+          body: message.content,
+          eventType: message.event_type
         });
       }
     } else if (run?.task) {
-      rows.push({ role: "user", title: "用户任务", body: run.task });
+      rows.push({ role: "user", title: "用户任务", body: run.task, eventType: "created" });
       for (const event of run.events ?? []) {
-        if (event.type === "action") rows.push({ role: "agent", title: "模型动作", body: actionSummary(event) });
-        if (event.type === "policy_blocked" || event.type === "final_blocked") rows.push({ role: "error", title: eventTitle(event), body: eventBody(event) });
-        if (event.type === "parse_error") rows.push({ role: "error", title: "结构化解析失败", body: eventBody(event) });
+        if (event.type === "policy_blocked" || event.type === "final_blocked") rows.push({ role: "error", title: eventTitle(event), body: eventBody(event), eventType: event.type });
+        if (event.type === "parse_error") rows.push({ role: "error", title: "结构化解析失败", body: eventBody(event), eventType: event.type });
       }
     }
-    if (error) rows.push({ role: "error", title: "界面错误", body: error });
+    if (error) rows.push({ role: "error", title: "界面错误", body: error, eventType: "error" });
     return rows;
   }, [error, run]);
 
@@ -377,12 +403,19 @@ function ChatTimeline({ run, error }: { run: TraceRun | null; error: string | nu
 
   return (
     <div className="chatTimeline">
-      {messages.map((message, index) => (
-        <article className={`chatBubble ${message.role}`} key={`${message.role}-${index}`}>
-          <span>{message.title}</span>
-          <RichText text={message.body} />
+      {messages.map((message, index) => {
+        const isStreaming = run?.status === "running" && message.eventType === "model_stream" && index === messages.length - 1;
+        return (
+        <article className={`chatBubble ${message.role} ${message.eventType === "model_stream" ? "streaming" : ""}`} key={`${message.role}-${index}`}>
+          <div className="bubbleHeader">
+            {message.role === "agent" ? <Bot size={16} /> : null}
+            <span>{message.title}</span>
+            {isStreaming ? <LoaderCircle className="spinIcon" size={15} /> : null}
+          </div>
+          <RichText text={message.body || "正在思考..."} />
         </article>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -421,15 +454,21 @@ function App() {
 
   useEffect(() => {
     if (!runId) return;
-    const refresh = () => {
+    const refreshRun = () => {
       void fetchRun(runId).then(setRun).catch((err: Error) => setError(err.message));
+    };
+    const refreshRunAndHistory = () => {
+      refreshRun();
       void fetchRuns().then(setRuns).catch((err: Error) => setError(err.message));
     };
-    refresh();
+    refreshRunAndHistory();
     const source = new EventSource(`/api/runs/${runId}/events`);
-    source.onmessage = refresh;
-    ["created", "status", "context_built", "model_stream_started", "model_stream_delta", "model_output", "action", "plan_updated", "observation", "final", "error", "cancelled", "policy_blocked", "final_blocked", "parse_error"].forEach((eventName) => {
-      source.addEventListener(eventName, refresh);
+    source.onmessage = refreshRun;
+    ["model_stream_delta", "model_stream_started"].forEach((eventName) => {
+      source.addEventListener(eventName, refreshRun);
+    });
+    ["created", "status", "context_built", "model_output", "action", "plan_updated", "observation", "final", "error", "cancelled", "policy_blocked", "final_blocked", "parse_error", "continued", "renamed"].forEach((eventName) => {
+      source.addEventListener(eventName, refreshRunAndHistory);
     });
     source.onerror = () => source.close();
     return () => source.close();
