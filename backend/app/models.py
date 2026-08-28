@@ -59,6 +59,17 @@ class TraceEvent(BaseModel):
     created_at: str = Field(default_factory=utc_now)
 
 
+ChatRole = Literal["user", "assistant", "tool", "system", "error"]
+
+
+class ChatMessage(BaseModel):
+    role: ChatRole
+    title: str
+    content: str
+    event_type: str | None = None
+    created_at: str = Field(default_factory=utc_now)
+
+
 class TraceRun(BaseModel):
     id: str = Field(default_factory=lambda: uuid4().hex)
     task: str
@@ -66,6 +77,7 @@ class TraceRun(BaseModel):
     plan: list[PlanNode] = Field(default_factory=list)
     observations: list[ToolObservation] = Field(default_factory=list)
     final_report: str | None = None
+    messages: list[ChatMessage] = Field(default_factory=list)
     events: list[TraceEvent] = Field(default_factory=list)
     created_at: str = Field(default_factory=utc_now)
     updated_at: str = Field(default_factory=utc_now)
@@ -76,3 +88,8 @@ class TraceRun(BaseModel):
         self.updated_at = utc_now()
         return event
 
+    def add_message(self, role: ChatRole, title: str, content: str, event_type: str | None = None) -> ChatMessage:
+        message = ChatMessage(role=role, title=title, content=content, event_type=event_type)
+        self.messages.append(message)
+        self.updated_at = utc_now()
+        return message

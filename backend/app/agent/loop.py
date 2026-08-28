@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import json
 
 from app.agent.action_parser import ActionParseError, parse_agent_action
 from app.agent.prompts import SYSTEM_PROMPT, build_repair_prompt, build_user_prompt
 from app.agent.workflow_policy import WorkflowPolicy
-from app.model_client import ModelProviderError
+from app.model_client import ModelClient, ModelProviderError
 from app.models import AgentAction, NodeStatus, ToolObservation, TraceRun
-from app.ollama_client import OllamaClient, OllamaConnectionError, OllamaModelError
+from app.ollama_client import OllamaConnectionError, OllamaModelError
 from app.tools.registry import ToolRegistry
 from app.trace_store import TraceStore
 
@@ -22,7 +23,7 @@ class AgentDecision:
 class AgentLoop:
     def __init__(
         self,
-        client: OllamaClient,
+        client: ModelClient,
         registry: ToolRegistry,
         store: TraceStore,
         max_steps: int,
@@ -44,6 +45,7 @@ class AgentLoop:
                 decision = await self._next_decision(run)
                 action = decision.action
                 run.add_event("action", {"step": step + 1, "action": action.model_dump()})
+                run.add_message("assistant", "模型动作", self._action_message(action), "action")
 
                 if action.kind == "plan":
                     run.plan = action.plan
@@ -59,6 +61,12 @@ class AgentLoop:
                         action.tool_call.args,
                     )
                     run.observations.append(observation)
+                    run.add_message(
+                        "tool" if observation.ok else "error",
+                        f"{observation.tool} {'成功' if observation.ok else '失败'}",
+                        observation.summary,
+                        "observation",
+                    )
                     self._mark_node(
                         run,
                         action.tool_call.node_id,
@@ -86,6 +94,7 @@ class AgentLoop:
                             },
                         )
                         run.observations.append(observation)
+                        run.add_message("error", "最终报告拦截", observation.summary, "final_blocked")
                         run.add_event(
                             "final_blocked",
                             {"reason": observation.summary, "guidance": policy_decision.guidance, "observation": observation.model_dump()},
@@ -94,12 +103,22 @@ class AgentLoop:
                         continue
                     run.status = "failed" if decision.terminal_error else "success"
                     run.final_report = action.final_report or "Task finished."
+                    run.add_message("assistant" if run.status == "success" else "error", "最终回复", run.final_report, "final")
                     run.add_event("final", {"final_report": run.final_report})
                     self.store.save(run)
                     return run
+        except asyncio.CancelledError:
+            run.status = "failed"
+            run.final_report = "任务已停止。"
+            run.add_message("error", "任务停止", run.final_report, "cancelled")
+            run.add_event("cancelled", {"message": run.final_report})
+            run.add_event("final", {"final_report": run.final_report})
+            self.store.save(run)
+            return run
         except (OllamaConnectionError, OllamaModelError, ModelProviderError) as exc:
             run.status = "failed"
             run.final_report = str(exc)
+            run.add_message("error", "运行错误", run.final_report, "error")
             run.add_event("error", {"message": str(exc), "error_type": exc.__class__.__name__})
             run.add_event("final", {"final_report": run.final_report})
             self.store.save(run)
@@ -107,14 +126,28 @@ class AgentLoop:
 
         run.status = "failed"
         run.final_report = f"Stopped after reaching the max step limit ({self.max_steps})."
+        run.add_message("error", "循环终止", run.final_report, "final")
         run.add_event("final", {"final_report": run.final_report})
         self.store.save(run)
         return run
 
     async def _next_decision(self, run: TraceRun) -> AgentDecision:
+        context_payload = self._trace_context_payload(run)
+        run.add_event(
+            "context_built",
+            {
+                "workflow": context_payload["workflow"],
+                "next_step_guidance": context_payload["next_step_guidance"],
+                "plan_count": len(context_payload["plan"]),
+                "recent_observation_count": len(context_payload["recent_observations"]),
+                "recent_guard_event_count": len(context_payload["recent_guard_events"]),
+                "context_limits": context_payload["context_limits"],
+            },
+        )
+        self.store.save(run)
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": build_user_prompt(run.task, self.registry.describe(), self._trace_context(run))},
+            {"role": "user", "content": build_user_prompt(run.task, self.registry.describe(), self._trace_context(context_payload))},
         ]
         raw = ""
         last_error = ""
@@ -130,11 +163,13 @@ class AgentLoop:
                     "policy_blocked",
                     {"reason": policy_decision.reason, "guidance": policy_decision.guidance, "action": action.model_dump()},
                 )
+                run.add_message("error", "策略拦截", f"原因：{policy_decision.reason}\n建议：{policy_decision.guidance}", "policy_blocked")
                 messages.append({"role": "assistant", "content": raw})
                 messages.append({"role": "user", "content": self._policy_repair_prompt(policy_decision)})
             except ActionParseError as exc:
                 last_error = str(exc)
                 run.add_event("parse_error", {"attempt": attempt + 1, "error": last_error, "raw": raw})
+                run.add_message("error", "模型输出解析失败", f"第 {attempt + 1} 次解析失败：{last_error}", "parse_error")
                 messages.append({"role": "assistant", "content": raw})
                 messages.append({"role": "user", "content": build_repair_prompt(raw, last_error)})
 
@@ -147,23 +182,30 @@ class AgentLoop:
             terminal_error=True,
         )
 
-    def _trace_context(self, run: TraceRun) -> str:
+    def _trace_context_payload(self, run: TraceRun) -> dict:
         plan = [node.model_dump() for node in run.plan]
         observations = [obs.model_dump() for obs in run.observations[-6:]]
-        workflow = self.policy.state(run). __dict__
+        workflow = self.policy.state(run).__dict__
         events = [
             {"type": event.type, "payload": event.payload}
             for event in run.events[-6:]
-            if event.type in {"parse_error", "final_blocked"}
+            if event.type in {"parse_error", "policy_blocked", "final_blocked"}
         ]
-        return json.dumps(
-            {
-                "workflow": workflow,
-                "next_step_guidance": self.policy.guidance(run),
-                "plan": plan,
-                "recent_observations": observations,
-                "recent_guard_events": events,
+        return {
+            "workflow": workflow,
+            "next_step_guidance": self.policy.guidance(run),
+            "plan": plan,
+            "recent_observations": observations,
+            "recent_guard_events": events,
+            "context_limits": {
+                "max_recent_observations": 6,
+                "max_recent_guard_events": 6,
             },
+        }
+
+    def _trace_context(self, payload: dict) -> str:
+        return json.dumps(
+            payload,
             ensure_ascii=False,
         )
 
@@ -172,6 +214,15 @@ class AgentLoop:
             if node.id == node_id:
                 node.status = status
                 return
+
+    def _action_message(self, action: AgentAction) -> str:
+        if action.kind == "plan":
+            return f"生成计划图：{len(action.plan)} 个节点。"
+        if action.kind == "final":
+            return "尝试输出最终回复。"
+        if action.tool_call is None:
+            return "模型请求执行工具，但缺少 tool_call。"
+        return f"调用工具 {action.tool_call.tool}，绑定节点 {action.tool_call.node_id}。"
 
     def _policy_repair_prompt(self, decision) -> str:
         return f"""The previous action was blocked by the workflow policy.

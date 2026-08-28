@@ -40,6 +40,7 @@ def test_agent_loop_repairs_invalid_model_action(tmp_path: Path) -> None:
 
     assert result.status == "success"
     assert result.final_report == "done"
+    assert [event.type for event in result.events].count("context_built") == 1
     assert [event.type for event in result.events].count("parse_error") == 1
     assert [event.type for event in result.events].count("model_output") == 2
 
@@ -64,11 +65,12 @@ def test_agent_loop_blocks_unverified_code_repair_final(tmp_path: Path) -> None:
             '{"kind":"final","final_report":"still fixed"}',
         ],
     )
-    run.task = "修复失败的测试"
+    run.task = "fix the failing tests"
 
     result = asyncio.run(loop.run(run))
 
     assert result.status == "failed"
+    assert any(event.type == "context_built" for event in result.events)
     assert any(event.type == "final_blocked" for event in result.events)
     assert any(observation.tool == "final_guard" for observation in result.observations)
 
@@ -81,7 +83,7 @@ def test_agent_loop_blocks_repeated_read_and_repairs_with_model(tmp_path: Path) 
             '{"kind":"tool","tool_call":{"tool":"run_command","node_id":"validate_before","args":{"command":"python -m pytest demo_project"}}}',
         ],
     )
-    run.task = "修复 demo_project 中失败的测试"
+    run.task = "fix the failing tests in demo_project"
     run.observations.append(
         ToolObservation(
             node_id="inspect",
@@ -96,4 +98,5 @@ def test_agent_loop_blocks_repeated_read_and_repairs_with_model(tmp_path: Path) 
 
     assert decision.action.tool_call is not None
     assert decision.action.tool_call.tool == "run_command"
+    assert any(event.type == "context_built" for event in run.events)
     assert any(event.type == "policy_blocked" for event in run.events)

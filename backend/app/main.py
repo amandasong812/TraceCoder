@@ -4,7 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -29,6 +29,14 @@ class ProbeRequest(BaseModel):
     prompt: str = "Return a two-step plan for checking backend health. Do not call tools."
 
 
+class RunSummary(BaseModel):
+    id: str
+    task: str
+    status: str
+    message_count: int
+    updated_at: str
+
+
 settings = get_settings()
 sandbox = WorkspaceSandbox(settings.workspace_root)
 store = TraceStore(settings.trace_dir)
@@ -42,6 +50,7 @@ client = build_model_client(
     settings.api_key,
 )
 agent = AgentLoop(client, registry, store, settings.max_agent_steps)
+running_tasks: dict[str, asyncio.Task] = {}
 
 app = FastAPI(title="TraceCoder API")
 app.add_middleware(
@@ -133,16 +142,63 @@ async def upload_file(file: UploadFile = File(...)) -> dict[str, object]:
     }
 
 
+@app.delete("/api/uploads")
+async def delete_uploaded_file(path: str = Query(...)) -> dict[str, object]:
+    target_path = sandbox.resolve(path)
+    uploads_dir = sandbox.resolve("uploads")
+    if uploads_dir not in target_path.parents:
+        raise HTTPException(status_code=400, detail="Only uploaded files can be deleted")
+    if not target_path.exists():
+        raise HTTPException(status_code=404, detail="Uploaded file not found")
+    if target_path.is_dir():
+        raise HTTPException(status_code=400, detail="Cannot delete upload directories")
+    target_path.unlink()
+    return {"ok": True, "path": path}
+
+
 @app.post("/api/runs")
 async def create_run(request: TaskRequest) -> dict[str, str]:
     run = store.create(request.task)
-    asyncio.create_task(agent.run(run))
+    task = asyncio.create_task(agent.run(run))
+    running_tasks[run.id] = task
+    task.add_done_callback(lambda _: running_tasks.pop(run.id, None))
     return {"run_id": run.id}
+
+
+@app.get("/api/runs")
+async def list_runs() -> list[RunSummary]:
+    return [
+        RunSummary(
+            id=run.id,
+            task=run.task,
+            status=run.status,
+            message_count=len(run.messages),
+            updated_at=run.updated_at,
+        )
+        for run in store.list()
+    ]
 
 
 @app.post("/api/demo/reset")
 async def reset_demo() -> dict[str, str]:
     return reset_demo_project(sandbox)
+
+
+@app.post("/api/runs/{run_id}/cancel")
+async def cancel_run(run_id: str) -> dict[str, object]:
+    run = store.get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    task = running_tasks.get(run_id)
+    if task is not None and not task.done():
+        task.cancel()
+    run.status = "failed"
+    run.final_report = "任务已停止。"
+    run.add_message("error", "任务停止", run.final_report, "cancelled")
+    run.add_event("cancelled", {"run_id": run_id})
+    run.add_event("final", {"final_report": run.final_report})
+    store.save(run)
+    return {"ok": True, "run_id": run_id, "status": run.status}
 
 
 @app.get("/api/runs/{run_id}")
