@@ -1,9 +1,12 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Activity, CheckCircle2, Circle, Cpu, FileUp, Play, Send, Terminal, Trash2, XCircle } from "lucide-react";
+import { Activity, CheckCircle2, Circle, Cpu, FileUp, ListChecks, PanelLeftClose, PanelLeftOpen, Pencil, Play, Send, Terminal, Trash2, XCircle } from "lucide-react";
 import {
   cancelRun,
+  continueRun,
   createRun,
+  deleteRun,
+  deleteRuns,
   deleteUploadedFile,
   fetchOllamaStatus,
   fetchRun,
@@ -15,6 +18,7 @@ import {
   TraceEvent,
   TraceRun,
   UploadedFile,
+  renameRun,
   uploadFile
 } from "./api/client";
 import "./styles.css";
@@ -243,6 +247,8 @@ function eventTitle(event: TraceEvent) {
   const titles: Record<string, string> = {
     context_built: "上下文窗口",
     model_output: "模型原始输出",
+    model_stream_started: "模型开始输出",
+    model_stream_delta: "模型增量输出",
     action: "结构化动作",
     policy_blocked: "策略拦截",
     final_blocked: "最终报告拦截",
@@ -265,6 +271,8 @@ function eventBody(event: TraceEvent) {
   }
   if (event.type === "action") return actionSummary(event);
   if (event.type === "model_output") return String(event.payload.raw ?? "");
+  if (event.type === "model_stream_started") return `第 ${String(event.payload.attempt ?? "?")} 次模型调用开始。`;
+  if (event.type === "model_stream_delta") return String(event.payload.delta ?? "");
   if (event.type === "policy_blocked" || event.type === "final_blocked") {
     return `原因：${String(event.payload.reason ?? "")}\n建议：${String(event.payload.guidance ?? "")}`;
   }
@@ -272,35 +280,64 @@ function eventBody(event: TraceEvent) {
   return String(event.payload.message ?? event.payload.final_report ?? JSON.stringify(event.payload, null, 2));
 }
 
-function AgentEventStream({ events }: { events: TraceEvent[] }) {
-  const visibleEvents = events.filter((event) =>
-    ["context_built", "model_output", "action", "policy_blocked", "final_blocked", "parse_error", "cancelled", "error"].includes(event.type)
-  );
-  if (visibleEvents.length === 0) return <div className="empty">运行开始后，这里会显示上下文构造、模型输出和动作解析。</div>;
-  return (
-    <div className="eventStream">
-      {visibleEvents.slice(-18).map((event, index) => (
-        <article className={`eventCard ${event.type}`} key={`${event.created_at}-${index}`}>
-          <div className="eventHeader">
-            <span>{eventTitle(event)}</span>
-            <time>{new Date(event.created_at).toLocaleTimeString()}</time>
-          </div>
-          <RichText text={eventBody(event)} />
-        </article>
-      ))}
-    </div>
-  );
-}
-
-function RunHistory({ runs, activeRunId, onSelect }: { runs: RunSummary[]; activeRunId: string | null; onSelect: (runId: string) => void }) {
+function RunHistory({
+  runs,
+  activeRunId,
+  isManaging,
+  selectedRunIds,
+  editingRunId,
+  draftTitle,
+  onSelect,
+  onToggleSelected,
+  onStartRename,
+  onRenameDraft,
+  onSubmitRename,
+  onDeleteOne
+}: {
+  runs: RunSummary[];
+  activeRunId: string | null;
+  isManaging: boolean;
+  selectedRunIds: Set<string>;
+  editingRunId: string | null;
+  draftTitle: string;
+  onSelect: (runId: string) => void;
+  onToggleSelected: (runId: string) => void;
+  onStartRename: (run: RunSummary) => void;
+  onRenameDraft: (title: string) => void;
+  onSubmitRename: () => void;
+  onDeleteOne: (runId: string) => void;
+}) {
   if (runs.length === 0) return <div className="empty">暂无历史对话。</div>;
   return (
     <div className="runHistory">
       {runs.slice(0, 8).map((item) => (
-        <button className={item.id === activeRunId ? "historyItem active" : "historyItem"} key={item.id} onClick={() => onSelect(item.id)}>
-          <span>{item.task}</span>
-          <small>{statusText[item.status]} · {item.message_count} 条消息</small>
-        </button>
+        <div className={item.id === activeRunId ? "historyItem active" : "historyItem"} key={item.id}>
+          {isManaging ? <input type="checkbox" checked={selectedRunIds.has(item.id)} onChange={() => onToggleSelected(item.id)} aria-label={`选择 ${item.title}`} /> : null}
+          {editingRunId === item.id ? (
+            <input
+              className="renameInput"
+              value={draftTitle}
+              autoFocus
+              onChange={(event) => onRenameDraft(event.target.value)}
+              onBlur={onSubmitRename}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") onSubmitRename();
+              }}
+            />
+          ) : (
+            <button className="historyTitle" onClick={() => onSelect(item.id)} title={item.title}>
+              {item.title}
+            </button>
+          )}
+          <div className="historyActions">
+            <button className="iconButton" onClick={() => onStartRename(item)} title="重命名">
+              <Pencil size={14} />
+            </button>
+            <button className="iconButton dangerIcon" onClick={() => onDeleteOne(item.id)} title="删除">
+              <Trash2 size={14} />
+            </button>
+          </div>
+        </div>
       ))}
     </div>
   );
@@ -313,7 +350,7 @@ function ChatTimeline({ run, error }: { run: TraceRun | null; error: string | nu
       for (const message of run.messages) {
         rows.push({
           role: message.role === "assistant" || message.role === "system" ? "agent" : message.role,
-          title: message.title,
+          title: message.event_type === "model_stream" ? "实时回复" : message.title,
           body: message.content
         });
       }
@@ -333,7 +370,7 @@ function ChatTimeline({ run, error }: { run: TraceRun | null; error: string | nu
     return (
       <div className="chatEmpty">
         <strong>输入一个编程任务，TraceCoder 会边执行边留下证据。</strong>
-        <span>右侧是对话，左侧是计划图、上下文窗口和模型动作流。</span>
+        <span>右侧会实时显示模型输出，中间会同步更新计划图和执行记录。</span>
       </div>
     );
   }
@@ -354,12 +391,18 @@ function App() {
   const [task, setTask] = useState("");
   const [runId, setRunId] = useState<string | null>(null);
   const [run, setRun] = useState<TraceRun | null>(null);
+  const [streamNonce, setStreamNonce] = useState(0);
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [model, setModel] = useState<OllamaStatus | null>(null);
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [isStarting, setIsStarting] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(true);
+  const [isManagingHistory, setIsManagingHistory] = useState(false);
+  const [selectedRunIds, setSelectedRunIds] = useState<Set<string>>(new Set());
+  const [editingRunId, setEditingRunId] = useState<string | null>(null);
+  const [draftTitle, setDraftTitle] = useState("");
 
   const completedNodes = useMemo(() => (run?.plan ?? []).filter((node) => node.status === "success").length, [run]);
   const evidence = useMemo(() => {
@@ -385,23 +428,23 @@ function App() {
     refresh();
     const source = new EventSource(`/api/runs/${runId}/events`);
     source.onmessage = refresh;
-    ["created", "status", "context_built", "model_output", "action", "plan_updated", "observation", "final", "error", "cancelled", "policy_blocked", "final_blocked", "parse_error"].forEach((eventName) => {
+    ["created", "status", "context_built", "model_stream_started", "model_stream_delta", "model_output", "action", "plan_updated", "observation", "final", "error", "cancelled", "policy_blocked", "final_blocked", "parse_error"].forEach((eventName) => {
       source.addEventListener(eventName, refresh);
     });
     source.onerror = () => source.close();
     return () => source.close();
-  }, [runId]);
+  }, [runId, streamNonce]);
 
   async function startRun() {
     const submittedTask = task.trim();
     if (!submittedTask) return;
     setIsStarting(true);
     setError(null);
-    setRun(null);
     setTask("");
     try {
-      const id = await createRun(submittedTask);
+      const id = runId && run?.status !== "running" ? await continueRun(runId, submittedTask) : await createRun(submittedTask);
       setRunId(id);
+      setStreamNonce((value) => value + 1);
       void fetchRuns().then(setRuns).catch((err: Error) => setError(err.message));
     } catch (err) {
       setTask(submittedTask);
@@ -417,6 +460,67 @@ function App() {
     try {
       const selected = await fetchRun(id);
       setRun(selected);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown error");
+    }
+  }
+
+  function toggleSelectedRun(id: string) {
+    setSelectedRunIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function startRenameHistory(item: RunSummary) {
+    setEditingRunId(item.id);
+    setDraftTitle(item.title);
+  }
+
+  async function submitRename() {
+    if (!editingRunId) return;
+    const title = draftTitle.trim();
+    const targetRunId = editingRunId;
+    setEditingRunId(null);
+    if (!title) return;
+    try {
+      await renameRun(targetRunId, title);
+      const updatedRuns = await fetchRuns();
+      setRuns(updatedRuns);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown error");
+    }
+  }
+
+  async function removeRun(id: string) {
+    try {
+      await deleteRun(id);
+      if (runId === id) {
+        setRunId(null);
+        setRun(null);
+      }
+      const updatedRuns = await fetchRuns();
+      setRuns(updatedRuns);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown error");
+    }
+  }
+
+  async function removeSelectedRuns() {
+    if (selectedRunIds.size === 0) return;
+    const ids = [...selectedRunIds];
+    try {
+      await deleteRuns(ids);
+      if (runId && selectedRunIds.has(runId)) {
+        setRunId(null);
+        setRun(null);
+      }
+      setSelectedRunIds(new Set());
+      setIsManagingHistory(false);
+      const updatedRuns = await fetchRuns();
+      setRuns(updatedRuns);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unknown error");
     }
@@ -468,22 +572,52 @@ function App() {
 
   return (
     <main>
-      <header className="hero">
-        <div>
-          <h1>TraceCoder</h1>
-          <p>把编程任务拆成计划图，逐步执行工具，并把上下文、模型输出、动作解析和验证证据留在页面上。</p>
-        </div>
-        <div className={`runStatus ${run?.status ?? "idle"}`}>{statusText[run?.status ?? "idle"]}</div>
-      </header>
-
-      <div className="workspace">
-        <aside className="leftRail">
-          <div className="sectionHeader">
-            <Cpu size={18} />
-            <h2>历史对话</h2>
+      <div className={historyOpen ? "workspace" : "workspace historyCollapsed"}>
+        <aside className="historyRail">
+          <div className="railHeader">
+            <div className="sectionHeader">
+              <Cpu size={18} />
+              <h2>历史对话</h2>
+            </div>
+            <div className="railActions">
+              <button className={isManagingHistory ? "railToggle active" : "railToggle"} onClick={() => setIsManagingHistory((value) => !value)} title="管理历史对话">
+                <ListChecks size={17} />
+              </button>
+              <button className="railToggle" onClick={() => setHistoryOpen(false)} title="隐藏历史对话">
+                <PanelLeftClose size={17} />
+              </button>
+            </div>
           </div>
-          <RunHistory runs={runs} activeRunId={runId} onSelect={(id) => void selectRun(id)} />
+          {isManagingHistory ? (
+            <div className="historyManageBar">
+              <span>{selectedRunIds.size} 个已选择</span>
+              <button onClick={() => void removeSelectedRuns()} disabled={selectedRunIds.size === 0}>
+                <Trash2 size={14} />
+                删除
+              </button>
+            </div>
+          ) : null}
+          <RunHistory
+            runs={runs}
+            activeRunId={runId}
+            isManaging={isManagingHistory}
+            selectedRunIds={selectedRunIds}
+            editingRunId={editingRunId}
+            draftTitle={draftTitle}
+            onSelect={(id) => void selectRun(id)}
+            onToggleSelected={toggleSelectedRun}
+            onStartRename={startRenameHistory}
+            onRenameDraft={setDraftTitle}
+            onSubmitRename={() => void submitRename()}
+            onDeleteOne={(id) => void removeRun(id)}
+          />
+        </aside>
 
+        <button className="historyPeek" onClick={() => setHistoryOpen(true)} title="显示历史对话">
+          <PanelLeftOpen size={17} />
+        </button>
+
+        <aside className="planRail">
           <section className="summaryBand">
             <div>
               <span>计划进度</span>
@@ -508,12 +642,6 @@ function App() {
             <h2>计划图</h2>
           </div>
           <PlanTimeline nodes={run?.plan ?? []} />
-
-          <div className="sectionHeader">
-            <Cpu size={18} />
-            <h2>模型动作流</h2>
-          </div>
-          <AgentEventStream events={run?.events ?? []} />
 
           <div className="sectionHeader">
             <Terminal size={18} />

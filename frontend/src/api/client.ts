@@ -43,9 +43,9 @@ export type TraceEvent = {
 
 export type RunSummary = {
   id: string;
+  title: string;
   task: string;
   status: TraceRun["status"];
-  message_count: number;
   updated_at: string;
 };
 
@@ -105,12 +105,56 @@ export async function createRun(task: string): Promise<string> {
   return data.run_id;
 }
 
+export async function continueRun(runId: string, task: string): Promise<string> {
+  const response = await fetch(`/api/runs/${runId}/continue`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task })
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to continue run: ${response.status}`);
+  }
+  const data = (await response.json()) as { run_id: string };
+  return data.run_id;
+}
+
 export async function fetchRuns(): Promise<RunSummary[]> {
   const response = await fetch("/api/runs");
   if (!response.ok) {
     throw new Error(`Failed to fetch runs: ${response.status}`);
   }
   return response.json();
+}
+
+export async function renameRun(runId: string, title: string): Promise<void> {
+  const response = await fetch(`/api/runs/${runId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ title })
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to rename run: ${response.status}`);
+  }
+}
+
+export async function deleteRun(runId: string): Promise<void> {
+  const response = await fetch(`/api/runs/${runId}`, {
+    method: "DELETE"
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to delete run: ${response.status}`);
+  }
+}
+
+export async function deleteRuns(runIds: string[]): Promise<void> {
+  const response = await fetch("/api/runs/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ run_ids: runIds })
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to delete runs: ${response.status}`);
+  }
 }
 
 export async function cancelRun(runId: string): Promise<void> {
