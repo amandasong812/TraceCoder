@@ -11,3 +11,4 @@ dist/
 .npm-cache/
 *.log
 traces/
+uploads/
