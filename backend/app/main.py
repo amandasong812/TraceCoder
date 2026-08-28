@@ -14,6 +14,7 @@ from app.agent.loop import AgentLoop
 from app.agent.prompts import SYSTEM_PROMPT
 from app.config import get_settings
 from app.demo import reset_demo_project
+from app.model_client import ModelProviderError, build_model_client
 from app.ollama_client import OllamaClient, OllamaConnectionError, OllamaModelError
 from app.tools import build_tool_registry
 from app.tools.sandbox import WorkspaceSandbox
@@ -32,7 +33,14 @@ settings = get_settings()
 sandbox = WorkspaceSandbox(settings.workspace_root)
 store = TraceStore(settings.trace_dir)
 registry = build_tool_registry(sandbox)
-client = OllamaClient(settings.ollama_base_url, settings.ollama_model)
+client = build_model_client(
+    settings.model_provider,
+    settings.ollama_base_url,
+    settings.ollama_model,
+    settings.api_base_url,
+    settings.api_model,
+    settings.api_key,
+)
 agent = AgentLoop(client, registry, store, settings.max_agent_steps)
 
 app = FastAPI(title="TraceCoder API")
@@ -47,21 +55,36 @@ app.add_middleware(
 
 @app.get("/api/health")
 async def health() -> dict[str, object]:
-    return {"status": "ok", "workspace": str(settings.workspace_root), "configured_model": settings.ollama_model}
+    return {
+        "status": "ok",
+        "workspace": str(settings.workspace_root),
+        "model_provider": settings.model_provider,
+        "configured_model": settings.ollama_model if settings.model_provider == "ollama" else settings.api_model,
+    }
 
 
-@app.get("/api/ollama")
-async def ollama_status() -> dict[str, object]:
+@app.get("/api/model")
+async def model_status() -> dict[str, object]:
     try:
         status = await client.status()
     except Exception as exc:
         return {
-            "base_url": settings.ollama_base_url,
+            "provider": settings.model_provider,
+            "base_url": settings.ollama_base_url if settings.model_provider == "ollama" else settings.api_base_url,
             "models": [],
             "selected_model": None,
             "error": str(exc),
         }
     return status
+
+
+@app.get("/api/ollama")
+async def ollama_status() -> dict[str, object]:
+    ollama = OllamaClient(settings.ollama_base_url, settings.ollama_model)
+    try:
+        return await ollama.status()
+    except Exception as exc:
+        return {"base_url": settings.ollama_base_url, "models": [], "selected_model": None, "error": str(exc)}
 
 
 @app.post("/api/ollama/probe")
@@ -78,13 +101,14 @@ async def ollama_probe(request: ProbeRequest) -> dict[str, object]:
     ]
     try:
         raw = await client.chat(messages)
-    except (OllamaConnectionError, OllamaModelError) as exc:
+    except (OllamaConnectionError, OllamaModelError, ModelProviderError) as exc:
         return {"ok": False, "raw": "", "error": str(exc)}
     try:
         action = parse_agent_action(raw)
     except ActionParseError as exc:
         return {"ok": False, "raw": raw, "error": str(exc)}
-    return {"ok": True, "model": await client.resolve_model(), "raw": raw, "action": action.model_dump()}
+    status = await client.status()
+    return {"ok": True, "model": status.get("selected_model"), "raw": raw, "action": action.model_dump()}
 
 
 @app.get("/api/tools")

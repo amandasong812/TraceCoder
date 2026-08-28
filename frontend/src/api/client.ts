@@ -33,7 +33,7 @@ export type OllamaStatus = {
 };
 
 export async function fetchOllamaStatus(): Promise<OllamaStatus> {
-  const response = await fetch("/api/ollama");
+  const response = await fetch("/api/model");
   if (!response.ok) {
     throw new Error(`Failed to fetch Ollama status: ${response.status}`);
   }
