@@ -83,6 +83,37 @@ h2 {
   margin-bottom: 22px;
 }
 
+.statusBand {
+  margin-bottom: 22px;
+}
+
+.modelGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.modelGrid div {
+  min-height: 72px;
+  border: 1px solid #dfe4ec;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px;
+}
+
+.modelGrid span {
+  display: block;
+  color: #6c7685;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.modelGrid strong {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+
 textarea {
   min-height: 108px;
   resize: vertical;
@@ -257,7 +288,8 @@ pre {
 
   .topbar,
   .taskBand,
-  .grid {
+  .grid,
+  .modelGrid {
     grid-template-columns: 1fr;
   }
 
@@ -269,4 +301,3 @@ pre {
     min-height: 48px;
   }
 }
-

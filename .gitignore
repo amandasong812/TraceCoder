@@ -7,6 +7,6 @@ venv/
 node_modules/
 dist/
 .vite/
+.npm-cache/
 *.log
 traces/
-

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Activity, CheckCircle2, Circle, Play, Send, Terminal, XCircle } from "lucide-react";
-import { createRun, fetchRun, Observation, PlanNode, TraceRun } from "./api/client";
+import { Activity, CheckCircle2, Circle, Cpu, Play, Send, Terminal, XCircle } from "lucide-react";
+import { createRun, fetchOllamaStatus, fetchRun, Observation, OllamaStatus, PlanNode, TraceRun } from "./api/client";
 import "./styles.css";
 
 const defaultTask =
@@ -59,10 +59,18 @@ function App() {
   const [task, setTask] = useState(defaultTask);
   const [runId, setRunId] = useState<string | null>(null);
   const [run, setRun] = useState<TraceRun | null>(null);
+  const [ollama, setOllama] = useState<OllamaStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isStarting, setIsStarting] = useState(false);
 
-  const newestObservation = useMemo(() => run?.observations.at(-1), [run]);
+  const newestObservation = useMemo(() => {
+    const observations = run?.observations ?? [];
+    return observations.length > 0 ? observations[observations.length - 1] : undefined;
+  }, [run]);
+
+  useEffect(() => {
+    void fetchOllamaStatus().then(setOllama).catch((err: Error) => setError(err.message));
+  }, []);
 
   useEffect(() => {
     if (!runId) return;
@@ -110,6 +118,31 @@ function App() {
           {isStarting ? <Play size={18} /> : <Send size={18} />}
           <span>{isStarting ? "Starting" : "Run Task"}</span>
         </button>
+      </section>
+
+      <section className="statusBand">
+        <div className="sectionHeader">
+          <Cpu size={18} />
+          <h2>Ollama</h2>
+        </div>
+        <div className="modelGrid">
+          <div>
+            <span>Endpoint</span>
+            <strong>{ollama?.base_url ?? "checking"}</strong>
+          </div>
+          <div>
+            <span>Model</span>
+            <strong>{ollama?.selected_model ?? "not selected"}</strong>
+          </div>
+          <div>
+            <span>Installed</span>
+            <strong>{ollama ? ollama.models.length : 0}</strong>
+          </div>
+          <div>
+            <span>Status</span>
+            <strong>{ollama?.error ?? "ready"}</strong>
+          </div>
+        </div>
       </section>
 
       {error ? <div className="error">{error}</div> : null}
@@ -160,4 +193,3 @@ createRoot(document.getElementById("root")!).render(
     <App />
   </React.StrictMode>
 );
-

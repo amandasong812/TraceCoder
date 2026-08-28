@@ -25,6 +25,21 @@ export type TraceRun = {
   final_report: string | null;
 };
 
+export type OllamaStatus = {
+  base_url: string;
+  models: string[];
+  selected_model: string | null;
+  error: string | null;
+};
+
+export async function fetchOllamaStatus(): Promise<OllamaStatus> {
+  const response = await fetch("/api/ollama");
+  if (!response.ok) {
+    throw new Error(`Failed to fetch Ollama status: ${response.status}`);
+  }
+  return response.json();
+}
+
 export async function createRun(task: string): Promise<string> {
   const response = await fetch("/api/runs", {
     method: "POST",
@@ -45,4 +60,3 @@ export async function fetchRun(runId: string): Promise<TraceRun> {
   }
   return response.json();
 }
-

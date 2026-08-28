@@ -21,7 +21,7 @@ TraceCoder 是一个基于 Ollama 的本地可视化编程智能体。它将编�
 TraceCoder/
 ├── backend/        # FastAPI 后端、agent loop、工具系统和 trace 存储
 ├── frontend/       # React/Vite 前端界面
-├── demo_project/   # 演示用 Python 项目
+├── demo_project/   # 演示用的 Python 项目
 └── README.md
 ```
 
